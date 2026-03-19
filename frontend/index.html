@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Blog Helper Upload</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <p class="eyebrow">Naver Blog Photo Sorter</p>
+        <h1>음식점 사진을 올리고 정리된 결과를 바로 확인하세요.</h1>
+        <p class="hero-copy">
+          여러 장의 사진을 드래그하거나 선택해서 업로드하면 분류가 끝난 뒤
+          결과 전용 페이지로 이동합니다.
+        </p>
+      </section>
+
+      <section class="panel upload-panel">
+        <div
+          id="dropzone"
+          class="dropzone"
+          role="button"
+          tabindex="0"
+          aria-label="이미지 업로드"
+        >
+          <div class="dropzone-inner">
+            <p class="dropzone-title">사진을 여기로 드래그하세요</p>
+            <p class="dropzone-subtitle">또는 파일 선택 버튼으로 여러 장 업로드</p>
+            <button id="pickButton" class="primary-button" type="button">
+              파일 선택
+            </button>
+            <input
+              id="fileInput"
+              class="hidden-input"
+              type="file"
+              accept="image/*"
+              multiple
+            />
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <div id="selectionInfo" class="selection-info">
+            아직 선택된 파일이 없습니다.
+          </div>
+          <button id="uploadButton" class="secondary-button" type="button" disabled>
+            업로드하고 분류 시작
+          </button>
+        </div>
+
+        <ul id="selectedList" class="selected-list"></ul>
+        <div id="feedback" class="feedback" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <div id="loadingOverlay" class="loading-overlay is-hidden" aria-live="polite">
+      <div class="loading-card">
+        <div class="loading-spinner"></div>
+        <p class="loading-title">사진을 분류하고 있습니다</p>
+        <p class="loading-copy">업로드가 끝나면 결과 페이지로 이동합니다.</p>
+      </div>
+    </div>
+
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

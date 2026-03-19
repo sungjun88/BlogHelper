@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Blog Helper Results</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero hero-compact">
+        <div class="hero-row">
+          <div>
+            <p class="eyebrow">Classification Result</p>
+            <h1>분류 결과를 검토하세요.</h1>
+            <p class="hero-copy">
+              카테고리별로 어떤 사진이 들어갔는지 확인하고 다시 업로드할 수 있습니다.
+            </p>
+          </div>
+          <a class="secondary-link" href="/">다시 업로드</a>
+        </div>
+      </section>
+
+      <section class="panel summary-panel">
+        <div class="panel-header">
+          <div>
+            <p class="section-label">Result</p>
+            <h2>분류 결과</h2>
+          </div>
+          <div id="summaryStats" class="summary-stats"></div>
+        </div>
+        <div id="uploadSummary" class="upload-summary"></div>
+        <div id="warnings" class="warnings"></div>
+        <div id="categoryGrid" class="category-grid"></div>
+      </section>
+    </main>
+
+    <div id="resultsLoadingOverlay" class="loading-overlay" aria-live="polite">
+      <div class="loading-card">
+        <div class="loading-spinner"></div>
+        <p class="loading-title">분류 결과를 불러오고 있습니다</p>
+        <p class="loading-copy">모든 사진 배치가 끝나면 결과 화면을 보여줍니다.</p>
+      </div>
+    </div>
+
+    <template id="categoryTemplate">
+      <section class="category-card">
+        <header class="category-header">
+          <div>
+            <p class="category-key"></p>
+            <h3 class="category-title"></h3>
+          </div>
+          <span class="category-count"></span>
+        </header>
+        <div class="category-items"></div>
+      </section>
+    </template>
+
+    <template id="imageCardTemplate">
+      <article class="image-card">
+        <img class="image-preview" alt="" />
+        <div class="image-meta">
+          <p class="image-name"></p>
+          <p class="image-confidence"></p>
+        </div>
+      </article>
+    </template>
+
+    <script src="/assets/results.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+backend/venv/
+
+# Local runtime data
+backend/uploads/
+backend/tuning_labels.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
