@@ -14,6 +14,7 @@ backend/venv/
 # Local runtime data
 backend/uploads/
 backend/tuning_labels.json
+backend/trained_classifier.npz
 
 # OS / editor
 .DS_Store

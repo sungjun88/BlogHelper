@@ -12,10 +12,7 @@
         <div class="hero-row">
           <div>
             <p class="eyebrow">Classification Result</p>
-            <h1>분류 결과를 검토하세요.</h1>
-            <p class="hero-copy">
-              카테고리별로 어떤 사진이 들어갔는지 확인하고 다시 업로드할 수 있습니다.
-            </p>
+            <h1>분류 결과를 확인하고 옮기세요.</h1>
           </div>
           <a class="secondary-link" href="/">다시 업로드</a>
         </div>
@@ -27,8 +24,12 @@
             <p class="section-label">Result</p>
             <h2>분류 결과</h2>
           </div>
-          <div id="summaryStats" class="summary-stats"></div>
+          <div class="summary-actions">
+            <div id="summaryStats" class="summary-stats"></div>
+            <button id="trainButton" class="secondary-button" type="button">학습</button>
+          </div>
         </div>
+        <div id="editorStatus" class="editor-status"></div>
         <div id="uploadSummary" class="upload-summary"></div>
         <div id="classifierStatus" class="classifier-status"></div>
         <div id="warnings" class="warnings"></div>
@@ -39,8 +40,8 @@
     <div id="resultsLoadingOverlay" class="loading-overlay" aria-live="polite">
       <div class="loading-card">
         <div class="loading-spinner"></div>
-        <p class="loading-title">분류 결과를 불러오고 있습니다</p>
-        <p class="loading-copy">모든 사진 배치가 끝나면 결과 화면을 보여줍니다.</p>
+        <p id="resultsLoadingTitle" class="loading-title">분류 결과를 불러오고 있습니다</p>
+        <p id="resultsLoadingCopy" class="loading-copy">현재 업로드된 사진을 정리하는 중입니다.</p>
       </div>
     </div>
 
@@ -53,17 +54,19 @@
           </div>
           <span class="category-count"></span>
         </header>
+        <div class="category-drop-hint">카드를 끌어오세요.</div>
         <div class="category-items"></div>
       </section>
     </template>
 
     <template id="imageCardTemplate">
-      <article class="image-card">
+      <article class="image-card" draggable="true">
         <img class="image-preview" alt="" />
         <div class="image-meta">
           <p class="image-name"></p>
           <p class="image-confidence"></p>
           <p class="image-classifier"></p>
+          <p class="image-origin"></p>
         </div>
       </article>
     </template>

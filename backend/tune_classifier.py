@@ -17,6 +17,7 @@ try:
         classify_image,
         get_trained_embedding_classifier,
         list_uploaded_images,
+        get_trainable_categories,
         train_embedding_classifier,
     )
 except ModuleNotFoundError:
@@ -26,6 +27,7 @@ except ModuleNotFoundError:
         classify_image,
         get_trained_embedding_classifier,
         list_uploaded_images,
+        get_trainable_categories,
         train_embedding_classifier,
     )
 
@@ -101,6 +103,7 @@ def collect_labeled_paths(
 ) -> tuple[list[tuple[Path, str]], list[str], list[tuple[str, str]]]:
     labels = load_labels(labels_file)
     valid_categories = {category.key for category in CATEGORY_DEFINITIONS}
+    trainable_categories = {category.key for category in get_trainable_categories()}
 
     labeled_paths: list[tuple[Path, str]] = []
     skipped_files: list[str] = []
@@ -115,6 +118,9 @@ def collect_labeled_paths(
         label = entry["label"]
         if label not in valid_categories:
             invalid_labels.append((image_path.name, label))
+            continue
+        if label not in trainable_categories:
+            skipped_files.append(image_path.name)
             continue
 
         labeled_paths.append((image_path, label))
@@ -288,7 +294,7 @@ def main() -> int:
         save_labels_template(image_dir, labels_file)
         print(f"Label template saved to: {labels_file}")
         print("Fill in the label field for each image, then rerun training or evaluation.")
-        print("Available categories: exterior, parking, interior, menu, food, thumbnail")
+        print("Available categories: exterior, parking, interior, menu, food, thumbnail, etc")
         return 0
 
     if args.show_model:

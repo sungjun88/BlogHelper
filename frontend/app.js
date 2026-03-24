@@ -95,19 +95,31 @@ function updateSelectionView() {
   state.files.forEach((file) => {
     const item = document.createElement("li");
     const sizeKb = Math.max(1, Math.round(file.size / 1024));
-    item.textContent = `${file.name} (${sizeKb} KB)`;
+    const kind = file.type.startsWith("video/") ? "video" : "image";
+    item.textContent = `${file.name} (${sizeKb} KB, ${kind})`;
     selectedList.append(item);
   });
 }
 
+function isAcceptedFile(file) {
+  const lowerName = file.name.toLowerCase();
+  return (
+    file.type.startsWith("image/") ||
+    file.type.startsWith("video/") ||
+    [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"].some((ext) =>
+      lowerName.endsWith(ext),
+    )
+  );
+}
+
 function setFiles(files) {
-  state.files = files.filter((file) => file.type.startsWith("image/"));
+  state.files = files.filter((file) => isAcceptedFile(file));
   const ignoredCount = files.length - state.files.length;
 
   updateSelectionView();
 
   if (ignoredCount > 0) {
-    setFeedback(`Only image files are allowed. ${ignoredCount} file(s) were ignored.`, true);
+    setFeedback(`Only image and video files are allowed. ${ignoredCount} file(s) were ignored.`, true);
     return;
   }
 

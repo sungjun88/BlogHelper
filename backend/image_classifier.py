@@ -29,6 +29,7 @@ class CategoryDefinition:
     enabled: bool
     prompts: tuple[str, ...]
     notes: str = ""
+    trainable: bool = True
 
 
 CATEGORY_DEFINITIONS: tuple[CategoryDefinition, ...] = (
@@ -93,6 +94,14 @@ CATEGORY_DEFINITIONS: tuple[CategoryDefinition, ...] = (
             "food on a table in a restaurant",
         ),
     ),
+    CategoryDefinition(
+        key="etc",
+        label="ETC",
+        enabled=True,
+        prompts=(),
+        notes="Use for photos you want to keep out of training and evaluation.",
+        trainable=False,
+    ),
 )
 
 
@@ -120,6 +129,10 @@ def _extract_clip_embedding(output: Any):
 
 def get_enabled_categories() -> list[CategoryDefinition]:
     return [category for category in CATEGORY_DEFINITIONS if category.enabled]
+
+
+def get_trainable_categories() -> list[CategoryDefinition]:
+    return [category for category in CATEGORY_DEFINITIONS if category.trainable]
 
 
 def list_uploaded_images(upload_dir: Path) -> list[Path]:
@@ -159,6 +172,7 @@ def get_category_metadata() -> list[dict[str, str | bool]]:
             "label": category.label,
             "enabled": category.enabled,
             "notes": category.notes,
+            "trainable": category.trainable,
             "classifier_mode": classifier_status["mode"],
         }
         for category in CATEGORY_DEFINITIONS
@@ -251,7 +265,7 @@ class LocalCLIPClassifier:
             self._build_text_features()
 
     def _build_text_features(self) -> None:
-        categories = get_enabled_categories()
+        categories = [category for category in get_enabled_categories() if category.prompts]
         prompts = [prompt for category in categories for prompt in category.prompts]
         prompt_keys = [category.key for category in categories for _ in category.prompts]
         self._text_features = self.encoder.encode_texts(prompts)
