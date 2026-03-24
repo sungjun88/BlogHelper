@@ -12,9 +12,12 @@
         <div class="hero-row">
           <div>
             <p class="eyebrow">Classification Result</p>
-            <h1>분류 결과를 확인하고 옮기세요.</h1>
+            <h1>GPS rows and category columns</h1>
+            <p class="hero-copy">
+              Each row is a GPS place group. Each column is a category. Drag thumbnails across columns inside the same row.
+            </p>
           </div>
-          <a class="secondary-link" href="/">다시 업로드</a>
+          <a class="secondary-link" href="/">Upload Again</a>
         </div>
       </section>
 
@@ -22,42 +25,28 @@
         <div class="panel-header">
           <div>
             <p class="section-label">Result</p>
-            <h2>분류 결과</h2>
+            <h2>Grouped Results</h2>
           </div>
           <div class="summary-actions">
             <div id="summaryStats" class="summary-stats"></div>
-            <button id="trainButton" class="secondary-button" type="button">학습</button>
+            <button id="trainButton" class="secondary-button" type="button">Train</button>
           </div>
         </div>
         <div id="editorStatus" class="editor-status"></div>
         <div id="uploadSummary" class="upload-summary"></div>
         <div id="classifierStatus" class="classifier-status"></div>
         <div id="warnings" class="warnings"></div>
-        <div id="categoryGrid" class="category-grid"></div>
+        <div id="matrixBoard" class="matrix-board"></div>
       </section>
     </main>
 
     <div id="resultsLoadingOverlay" class="loading-overlay" aria-live="polite">
       <div class="loading-card">
         <div class="loading-spinner"></div>
-        <p id="resultsLoadingTitle" class="loading-title">분류 결과를 불러오고 있습니다</p>
-        <p id="resultsLoadingCopy" class="loading-copy">현재 업로드된 사진을 정리하는 중입니다.</p>
+        <p id="resultsLoadingTitle" class="loading-title">Loading results</p>
+        <p id="resultsLoadingCopy" class="loading-copy">Organizing uploaded media.</p>
       </div>
     </div>
-
-    <template id="categoryTemplate">
-      <section class="category-card">
-        <header class="category-header">
-          <div>
-            <p class="category-key"></p>
-            <h3 class="category-title"></h3>
-          </div>
-          <span class="category-count"></span>
-        </header>
-        <div class="category-drop-hint">카드를 끌어오세요.</div>
-        <div class="category-items"></div>
-      </section>
-    </template>
 
     <template id="imageCardTemplate">
       <article class="image-card" draggable="true">

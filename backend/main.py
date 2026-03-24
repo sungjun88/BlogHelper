@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ try:
         list_uploaded_images,
         train_embedding_classifier,
     )
+    from backend.place_lookup import cluster_media_by_gps, lookup_place_info
 except ModuleNotFoundError:
     from image_classifier import (
         ALLOWED_IMAGE_EXTENSIONS,
@@ -31,6 +33,7 @@ except ModuleNotFoundError:
         list_uploaded_images,
         train_embedding_classifier,
     )
+    from place_lookup import cluster_media_by_gps, lookup_place_info
 
 
 app = FastAPI()
@@ -49,8 +52,10 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 app.mount("/assets", StaticFiles(directory=FRONTEND_DIR), name="assets")
 
 UPLOAD_JOBS: dict[str, dict] = {}
+MEDIA_METADATA_CACHE: dict[str, dict[str, Any]] = {}
 VALID_CATEGORY_KEYS = {category.key for category in CATEGORY_DEFINITIONS}
 TRAINABLE_CATEGORY_KEYS = {category.key for category in CATEGORY_DEFINITIONS if category.trainable}
+TIMESTAMP_FILENAME_PATTERN = re.compile(r"^\d{8}_\d{6}$")
 
 
 class LabelUpdateRequest(BaseModel):
@@ -225,7 +230,105 @@ def _serialize_media_analysis(analysis: dict, media_path: Path) -> dict:
     }
 
 
+def _get_cached_place_info(media_path: Path, analysis_target: Path) -> dict[str, Any] | None:
+    cache_key = media_path.name
+    cache_entry = MEDIA_METADATA_CACHE.get(cache_key)
+    target_mtime = analysis_target.stat().st_mtime if analysis_target.exists() else None
+    if cache_entry and cache_entry.get("target_mtime") == target_mtime:
+        return cache_entry.get("place_info")
+
+    try:
+        place_info = lookup_place_info(analysis_target)
+    except Exception:
+        place_info = None
+    MEDIA_METADATA_CACHE[cache_key] = {
+        "target_mtime": target_mtime,
+        "place_info": place_info,
+    }
+    return place_info
+
+
+def _build_media_analysis(media_path: Path, assignments: dict[str, str] | None = None) -> dict[str, Any]:
+    analysis_target = _get_analysis_target(media_path)
+    analysis = classify_image(analysis_target)
+    if assignments is not None:
+        analysis = _apply_manual_label(
+            analysis,
+            assignments,
+            lookup_filename=media_path.name,
+        )
+
+    serialized = _serialize_media_analysis(analysis, media_path)
+    serialized["place_info"] = _get_cached_place_info(media_path, analysis_target)
+    return serialized
+
+
+def _is_timestamp_filename(filename: str) -> bool:
+    return bool(TIMESTAMP_FILENAME_PATTERN.fullmatch(Path(filename).stem))
+
+
+def _infer_location_groups_from_neighbors(
+    analyses: list[dict[str, Any]],
+    location_groups: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    filename_to_group_id: dict[str, str] = {}
+    groups_by_id = {group["group_id"]: group for group in location_groups}
+
+    for group in location_groups:
+        for item in group["items"]:
+            filename_to_group_id[item["filename"]] = group["group_id"]
+
+    def find_neighbor_group_id(start_index: int, step: int) -> str | None:
+        neighbor_index = start_index + step
+        if neighbor_index < 0 or neighbor_index >= len(analyses):
+            return None
+
+        neighbor = analyses[neighbor_index]
+        return filename_to_group_id.get(neighbor["filename"])
+
+    for index, analysis in enumerate(analyses):
+        filename = analysis["filename"]
+        if filename in filename_to_group_id or not _is_timestamp_filename(filename):
+            continue
+
+        previous_group_id = find_neighbor_group_id(index, -1)
+        next_group_id = find_neighbor_group_id(index, 1)
+
+        target_group_id = None
+        if previous_group_id and next_group_id:
+            if previous_group_id == next_group_id:
+                target_group_id = previous_group_id
+        else:
+            target_group_id = previous_group_id or next_group_id
+
+        if not target_group_id:
+            continue
+
+        target_group = groups_by_id.get(target_group_id)
+        if not target_group:
+            continue
+
+        place_info = dict(analysis.get("place_info") or {})
+        place_info["inferred_from_neighbors"] = True
+        place_info["inferred_group_id"] = target_group_id
+        place_info["inferred_place_name"] = target_group.get("place_name")
+        place_info["inferred_address"] = target_group.get("address")
+        place_info["neighbor_filenames"] = {
+            "previous": analyses[index - 1]["filename"] if index > 0 else None,
+            "next": analyses[index + 1]["filename"] if index + 1 < len(analyses) else None,
+        }
+        analysis["place_info"] = place_info
+        target_group["items"].append(analysis)
+
+    for group in location_groups:
+        group["count"] = len(group["items"])
+
+    location_groups.sort(key=lambda group: group["count"], reverse=True)
+    return location_groups
+
+
 def _clear_upload_dir() -> None:
+    MEDIA_METADATA_CACHE.clear()
     for path in UPLOAD_DIR.iterdir():
         if path.is_file():
             path.unlink()
@@ -455,7 +558,7 @@ async def upload_images(files: list[UploadFile] = File(...), job_id: str | None 
             analysis_target = file_path
             if file_extension in ALLOWED_VIDEO_EXTENSIONS:
                 analysis_target = _extract_video_thumbnail(file_path)
-            uploaded_files.append(_serialize_media_analysis(classify_image(analysis_target), file_path))
+            uploaded_files.append(_build_media_analysis(file_path))
             _update_upload_job(
                 job,
                 processed_files=index,
@@ -464,10 +567,16 @@ async def upload_images(files: list[UploadFile] = File(...), job_id: str | None 
             )
         except Exception:
             if file_path.exists():
-                file_path.unlink()
+                try:
+                    file_path.unlink()
+                except PermissionError:
+                    pass
             thumbnail_path = _video_thumbnail_path(file_path)
             if thumbnail_path.exists():
-                thumbnail_path.unlink()
+                try:
+                    thumbnail_path.unlink()
+                except PermissionError:
+                    pass
             failed_files.append(
                 {
                     "filename": file.filename,
@@ -516,16 +625,13 @@ def get_uploaded_images():
 def get_categorized_images():
     assignments = _get_uploaded_label_assignments()
     analyses = [
-        _serialize_media_analysis(
-            _apply_manual_label(
-                classify_image(_get_analysis_target(path)),
-                assignments,
-                lookup_filename=path.name,
-            ),
-            path,
-        )
+        _build_media_analysis(path, assignments)
         for path in _list_uploaded_media()
     ]
+    location_groups = _infer_location_groups_from_neighbors(
+        analyses,
+        cluster_media_by_gps(analyses, max_distance_meters=10.0),
+    )
     grouped_images = {category.key: [] for category in CATEGORY_DEFINITIONS}
     for analysis in analyses:
         grouped_images[analysis["category"]].append(analysis)
@@ -534,5 +640,6 @@ def get_categorized_images():
         "total_count": len(analyses),
         "categories": get_category_metadata(),
         "grouped_images": grouped_images,
+        "location_groups": location_groups,
         "assignments": assignments,
     }

@@ -2,8 +2,7 @@ const summaryStats = document.querySelector("#summaryStats");
 const uploadSummary = document.querySelector("#uploadSummary");
 const classifierStatus = document.querySelector("#classifierStatus");
 const warnings = document.querySelector("#warnings");
-const categoryGrid = document.querySelector("#categoryGrid");
-const categoryTemplate = document.querySelector("#categoryTemplate");
+const matrixBoard = document.querySelector("#matrixBoard");
 const imageCardTemplate = document.querySelector("#imageCardTemplate");
 const resultsLoadingOverlay = document.querySelector("#resultsLoadingOverlay");
 const resultsLoadingTitle = document.querySelector("#resultsLoadingTitle");
@@ -14,12 +13,15 @@ const trainButton = document.querySelector("#trainButton");
 const state = {
   categories: [],
   groupedImages: {},
+  locationGroups: [],
   assignments: {},
   dragFilename: null,
+  dragRowId: null,
   hoverPreview: null,
   hoverPreviewImage: null,
   hoverPreviewName: null,
   hoverPreviewMeta: null,
+  hoverPreviewPlace: null,
 };
 
 function ensureHoverPreview() {
@@ -43,7 +45,10 @@ function ensureHoverPreview() {
   const meta = document.createElement("p");
   meta.className = "hover-preview-meta";
 
-  info.append(name, meta);
+  const place = document.createElement("p");
+  place.className = "hover-preview-place";
+
+  info.append(name, meta, place);
   preview.append(image, info);
   document.body.append(preview);
 
@@ -51,6 +56,7 @@ function ensureHoverPreview() {
   state.hoverPreviewImage = image;
   state.hoverPreviewName = name;
   state.hoverPreviewMeta = meta;
+  state.hoverPreviewPlace = place;
 }
 
 function updateHoverPreviewPosition(event) {
@@ -75,20 +81,61 @@ function updateHoverPreviewPosition(event) {
   state.hoverPreview.style.top = `${top}px`;
 }
 
+function getClassifierInfo(image) {
+  if (image?.features?.classifier === "trained_clip") {
+    return { label: "Trained CLIP", className: "is-trained" };
+  }
+
+  if (image?.features?.classifier === "local_clip") {
+    return { label: "Base CLIP", className: "is-clip" };
+  }
+
+  return { label: "Heuristic", className: "is-heuristic" };
+}
+
 function showHoverPreview(event, image) {
   ensureHoverPreview();
 
   const classifierInfo = getClassifierInfo(image);
-  const sourceText = image.media_type === "video" ? "동영상 썸네일 기준" : "이미지 기준";
-  const labelText = image.is_manual_label ? "수정됨" : "자동 분류";
-  const confidence = `신뢰도 ${Math.round((image.confidence || 0) * 100)}%`;
+  const sourceText = image.media_type === "video" ? "video thumbnail" : "image";
+  const labelText = image.is_manual_label ? "edited" : "auto";
+  const confidence = `Confidence ${Math.round((image.confidence || 0) * 100)}%`;
+  const placeInfo = image.place_info || {};
+  const gps = placeInfo.gps;
+  const nearest = placeInfo.nearest_place;
+  const nearbyPlaces = Array.isArray(placeInfo.nearby_places) ? placeInfo.nearby_places : [];
+  const reverse = placeInfo.reverse_geocode;
+  const inferredPlaceName = placeInfo.inferred_place_name;
+  const inferredAddress = placeInfo.inferred_address;
+  const inferredFromNeighbors = placeInfo.inferred_from_neighbors;
 
   state.hoverPreviewImage.src = image.image_url;
   state.hoverPreviewImage.alt = image.filename || "";
   state.hoverPreviewName.textContent = image.filename || "";
   state.hoverPreviewMeta.textContent = `${confidence} / ${classifierInfo.label} / ${sourceText} / ${labelText}`;
-  state.hoverPreview.classList.remove("is-hidden");
 
+  if (gps) {
+    const gpsText = `GPS ${gps.latitude}, ${gps.longitude}`;
+    const candidatesText = nearbyPlaces.length
+      ? nearbyPlaces
+          .map((place, index) => `${index + 1}. ${place.name}${place.distance_meters ? ` (${place.distance_meters}m)` : ""}`)
+          .join(" / ")
+      : nearest?.name
+        ? `1. ${nearest.name}${nearest.distance_meters ? ` (${nearest.distance_meters}m)` : ""}`
+        : "";
+    const fallbackText = reverse?.display_name
+      ? `Address: ${reverse.display_name}`
+      : "GPS found, but no nearby place matched.";
+    state.hoverPreviewPlace.textContent = candidatesText
+      ? `${gpsText} / Candidates: ${candidatesText}`
+      : `${gpsText} / ${fallbackText}`;
+  } else {
+    state.hoverPreviewPlace.textContent = inferredFromNeighbors
+      ? `No GPS metadata / Inferred place: ${inferredPlaceName || "Unknown"}${inferredAddress ? ` / ${inferredAddress}` : ""}`
+      : "No GPS metadata";
+  }
+
+  state.hoverPreview.classList.remove("is-hidden");
   updateHoverPreviewPosition(event);
 }
 
@@ -101,12 +148,10 @@ function hideHoverPreview() {
   state.hoverPreviewImage.removeAttribute("src");
   state.hoverPreviewName.textContent = "";
   state.hoverPreviewMeta.textContent = "";
+  state.hoverPreviewPlace.textContent = "";
 }
 
-function showResultsLoading(
-  title = "분류 결과를 불러오고 있습니다",
-  message = "현재 업로드된 사진을 정리하는 중입니다.",
-) {
+function showResultsLoading(title = "Loading results", message = "Organizing uploaded media.") {
   resultsLoadingTitle.textContent = title;
   resultsLoadingCopy.textContent = message;
   resultsLoadingOverlay.classList.remove("is-hidden");
@@ -144,9 +189,9 @@ function renderUploadSummary(result) {
   }
 
   uploadSummary.innerHTML = `
-    <div class="summary-chip">분류 완료 ${result.uploaded_count || 0}개</div>
-    <div class="summary-chip">제외 ${result.ignored_count || 0}개</div>
-    <div class="summary-chip">실패 ${result.failed_count || 0}개</div>
+    <div class="summary-chip">Uploaded ${result.uploaded_count || 0}</div>
+    <div class="summary-chip">Ignored ${result.ignored_count || 0}</div>
+    <div class="summary-chip">Failed ${result.failed_count || 0}</div>
   `;
 }
 
@@ -157,18 +202,12 @@ function renderWarnings(result) {
   }
 
   const sections = [
-    {
-      title: "업로드에서 제외된 파일",
-      items: result.ignored_files || [],
-    },
-    {
-      title: "분석에 실패한 파일",
-      items: result.failed_files || [],
-    },
+    { title: "Ignored files", items: result.ignored_files || [] },
+    { title: "Failed files", items: result.failed_files || [] },
   ];
 
   sections.forEach((section) => {
-    if (section.items.length === 0) {
+    if (!section.items.length) {
       return;
     }
 
@@ -194,31 +233,10 @@ function renderWarnings(result) {
   });
 }
 
-function getClassifierInfo(image) {
-  if (image?.features?.classifier === "trained_clip") {
-    return {
-      label: "학습된 CLIP 분류기",
-      className: "is-trained",
-    };
-  }
-
-  if (image?.features?.classifier === "local_clip") {
-    return {
-      label: "CLIP 기본 분류",
-      className: "is-clip",
-    };
-  }
-
-  return {
-    label: "휴리스틱 분류",
-    className: "is-heuristic",
-  };
-}
-
 function renderClassifierStatus() {
   const images = Object.values(state.groupedImages).flat();
 
-  if (images.length === 0) {
+  if (!images.length) {
     classifierStatus.innerHTML = "";
     return;
   }
@@ -231,25 +249,25 @@ function renderClassifierStatus() {
 
   const parts = [];
   if (counts.trained_clip) {
-    parts.push(`<div class="classifier-chip is-trained">학습된 모델 ${counts.trained_clip}장</div>`);
+    parts.push(`<div class="classifier-chip is-trained">Trained ${counts.trained_clip}</div>`);
   }
   if (counts.local_clip) {
-    parts.push(`<div class="classifier-chip is-clip">기본 CLIP ${counts.local_clip}장</div>`);
+    parts.push(`<div class="classifier-chip is-clip">Base CLIP ${counts.local_clip}</div>`);
   }
   if (counts.heuristic_fallback) {
-    parts.push(`<div class="classifier-chip is-heuristic">휴리스틱 ${counts.heuristic_fallback}장</div>`);
+    parts.push(`<div class="classifier-chip is-heuristic">Heuristic ${counts.heuristic_fallback}</div>`);
   }
   if (Object.keys(counts).length > 1) {
-    parts.push('<div class="classifier-chip is-mixed">현재 배치에는 여러 분류기가 함께 사용되었습니다.</div>');
+    parts.push('<div class="classifier-chip is-mixed">Multiple classifiers were used.</div>');
   }
 
   classifierStatus.innerHTML = parts.join("");
 }
 
-function createEmptyState() {
+function createEmptyState(message = "No items") {
   const empty = document.createElement("div");
   empty.className = "category-empty";
-  empty.textContent = "분류된 항목이 없습니다.";
+  empty.textContent = message;
   return empty;
 }
 
@@ -263,8 +281,35 @@ function updateAssignmentsFromGroups() {
   state.assignments = assignments;
 }
 
-function moveImageToCategory(filename, targetCategory) {
+function findImageRowId(filename) {
+  for (const group of state.locationGroups) {
+    if (group.items.some((item) => item.filename === filename)) {
+      return group.group_id;
+    }
+  }
+  return "no-gps";
+}
+
+function syncLocationGroupCategory(filename, targetCategory) {
+  state.locationGroups.forEach((group) => {
+    group.items.forEach((item) => {
+      if (item.filename === filename) {
+        item.category = targetCategory;
+        item.manual_label = targetCategory;
+        item.is_manual_label = true;
+      }
+    });
+  });
+}
+
+function moveImageToCategory(filename, targetCategory, targetRowId) {
   if (!filename || !targetCategory || !state.groupedImages[targetCategory]) {
+    return;
+  }
+
+  const sourceRowId = findImageRowId(filename);
+  if (sourceRowId !== targetRowId) {
+    setEditorStatus("GPS row is fixed. Drag thumbnails only across columns inside the same row.", "error");
     return;
   }
 
@@ -292,118 +337,253 @@ function moveImageToCategory(filename, targetCategory) {
   movedImage.manual_label = targetCategory;
   movedImage.is_manual_label = true;
   state.groupedImages[targetCategory].unshift(movedImage);
+  syncLocationGroupCategory(filename, targetCategory);
   updateAssignmentsFromGroups();
   renderClassifierStatus();
-  renderCategories();
-  setEditorStatus(`"${movedImage.filename}" 항목을 ${targetCategory} 카테고리로 옮겼습니다. 학습 버튼을 누르면 이 수정 결과가 반영됩니다.`, "info");
+  renderMatrixBoard();
+  setEditorStatus(`Moved "${movedImage.filename}" to ${targetCategory}. Click Train to save this edit.`, "info");
 }
 
-function buildCategoryCard(category) {
-  const fragment = categoryTemplate.content.cloneNode(true);
-  const card = fragment.querySelector(".category-card");
-  const keyElement = fragment.querySelector(".category-key");
-  const titleElement = fragment.querySelector(".category-title");
-  const countElement = fragment.querySelector(".category-count");
-  const itemsContainer = fragment.querySelector(".category-items");
-  const images = state.groupedImages[category.key] || [];
+function buildImageCard(image, rowId) {
+  const imageFragment = imageCardTemplate.content.cloneNode(true);
+  const cardElement = imageFragment.querySelector(".image-card");
+  const imageElement = imageFragment.querySelector(".image-preview");
+  const classifierElement = imageFragment.querySelector(".image-classifier");
+  const originElement = imageFragment.querySelector(".image-origin");
+  const confidenceElement = imageFragment.querySelector(".image-confidence");
+  const nameElement = imageFragment.querySelector(".image-name");
+  const classifierInfo = getClassifierInfo(image);
 
-  card.dataset.category = category.key;
-  keyElement.textContent = category.key;
-  titleElement.textContent = category.label;
-  countElement.textContent = `${images.length}`;
+  cardElement.dataset.filename = image.filename;
+  cardElement.dataset.rowId = rowId;
+  imageElement.src = image.image_url;
+  imageElement.alt = image.filename;
+  nameElement.textContent = image.filename;
+  confidenceElement.textContent = `Confidence ${Math.round((image.confidence || 0) * 100)}%`;
+  classifierElement.textContent = classifierInfo.label;
+  classifierElement.className = `image-classifier ${classifierInfo.className}`;
 
-  card.addEventListener("dragover", (event) => {
-    event.preventDefault();
-    card.classList.add("is-drop-target");
+  const sourceText = image.media_type === "video" ? "Video thumbnail" : "Image";
+  const labelText = image.is_manual_label ? "edited" : "auto";
+  originElement.textContent = `${sourceText} / ${labelText}`;
+
+  imageElement.addEventListener("mouseenter", (event) => {
+    showHoverPreview(event, image);
   });
 
-  card.addEventListener("dragleave", () => {
-    card.classList.remove("is-drop-target");
+  imageElement.addEventListener("mousemove", (event) => {
+    updateHoverPreviewPosition(event);
   });
 
-  card.addEventListener("drop", (event) => {
-    event.preventDefault();
-    card.classList.remove("is-drop-target");
-    moveImageToCategory(state.dragFilename, category.key);
+  imageElement.addEventListener("mouseleave", hideHoverPreview);
+
+  cardElement.addEventListener("dragstart", (event) => {
+    hideHoverPreview();
+    state.dragFilename = image.filename;
+    state.dragRowId = rowId;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", image.filename);
+    cardElement.classList.add("is-dragging");
+  });
+
+  cardElement.addEventListener("dragend", () => {
     state.dragFilename = null;
+    state.dragRowId = null;
+    cardElement.classList.remove("is-dragging");
+    document.querySelectorAll(".matrix-cell").forEach((item) => {
+      item.classList.remove("is-drop-target");
+      item.classList.remove("is-drop-blocked");
+    });
   });
 
-  if (images.length === 0) {
-    itemsContainer.append(createEmptyState());
-    return card;
+  return imageFragment;
+}
+
+function createMatrixCell(categoryKey, rowId, images) {
+  const cell = document.createElement("div");
+  cell.className = "matrix-cell";
+  cell.dataset.category = categoryKey;
+  cell.dataset.rowId = rowId;
+
+  const items = document.createElement("div");
+  items.className = "matrix-cell-items";
+
+  cell.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    const isAllowed = !state.dragRowId || state.dragRowId === rowId;
+    cell.classList.toggle("is-drop-target", isAllowed);
+    cell.classList.toggle("is-drop-blocked", !isAllowed);
+  });
+
+  cell.addEventListener("dragleave", () => {
+    cell.classList.remove("is-drop-target");
+    cell.classList.remove("is-drop-blocked");
+  });
+
+  cell.addEventListener("drop", (event) => {
+    event.preventDefault();
+    cell.classList.remove("is-drop-target");
+    cell.classList.remove("is-drop-blocked");
+    moveImageToCategory(state.dragFilename, categoryKey, rowId);
+    state.dragFilename = null;
+    state.dragRowId = null;
+  });
+
+  if (!images.length) {
+    items.append(createEmptyState());
+  } else {
+    images.forEach((image) => {
+      items.append(buildImageCard(image, rowId));
+    });
   }
 
-  images.forEach((image) => {
-    const imageFragment = imageCardTemplate.content.cloneNode(true);
-    const cardElement = imageFragment.querySelector(".image-card");
-    const imageElement = imageFragment.querySelector(".image-preview");
-    const classifierElement = imageFragment.querySelector(".image-classifier");
-    const originElement = imageFragment.querySelector(".image-origin");
-    const confidenceElement = imageFragment.querySelector(".image-confidence");
-    const nameElement = imageFragment.querySelector(".image-name");
-    const classifierInfo = getClassifierInfo(image);
-
-    cardElement.dataset.filename = image.filename;
-    imageElement.src = image.image_url;
-    imageElement.alt = image.filename;
-    nameElement.textContent = image.filename;
-    confidenceElement.textContent = `신뢰도 ${Math.round((image.confidence || 0) * 100)}%`;
-    classifierElement.textContent = classifierInfo.label;
-    classifierElement.className = `image-classifier ${classifierInfo.className}`;
-
-    const sourceText = image.media_type === "video" ? "동영상 썸네일 기준 분류" : "이미지 기준 분류";
-    const labelText = image.is_manual_label ? "수정됨" : "자동 분류";
-    originElement.textContent = `${sourceText} / ${labelText}`;
-
-    imageElement.addEventListener("mouseenter", (event) => {
-      showHoverPreview(event, image);
-    });
-
-    imageElement.addEventListener("mousemove", (event) => {
-      updateHoverPreviewPosition(event);
-    });
-
-    imageElement.addEventListener("mouseleave", () => {
-      hideHoverPreview();
-    });
-
-    cardElement.addEventListener("dragstart", (event) => {
-      hideHoverPreview();
-      state.dragFilename = image.filename;
-      event.dataTransfer.effectAllowed = "move";
-      event.dataTransfer.setData("text/plain", image.filename);
-      cardElement.classList.add("is-dragging");
-    });
-
-    cardElement.addEventListener("dragend", () => {
-      state.dragFilename = null;
-      cardElement.classList.remove("is-dragging");
-      document.querySelectorAll(".category-card").forEach((item) => {
-        item.classList.remove("is-drop-target");
-      });
-    });
-
-    itemsContainer.append(imageFragment);
-  });
-
-  return card;
+  cell.append(items);
+  return cell;
 }
 
-function renderCategories() {
-  categoryGrid.innerHTML = "";
+function buildNoGpsRow() {
+  const groupedNames = new Set();
+  state.locationGroups.forEach((group) => {
+    group.items.forEach((item) => groupedNames.add(item.filename));
+  });
+
+  const items = Object.values(state.groupedImages)
+    .flat()
+    .filter((item) => !groupedNames.has(item.filename));
+
+  return {
+    group_id: "no-gps",
+    count: items.length,
+    place_name: "No GPS",
+    address: "Items without readable GPS metadata",
+    center: null,
+    items,
+  };
+}
+
+function groupItemsByCategory(items) {
+  const grouped = {};
+  state.categories.forEach((category) => {
+    grouped[category.key] = [];
+  });
+
+  items.forEach((item) => {
+    if (!grouped[item.category]) {
+      grouped[item.category] = [];
+    }
+    grouped[item.category].push(item);
+  });
+
+  return grouped;
+}
+
+function createHeaderRow() {
+  const headerRow = document.createElement("div");
+  headerRow.className = "matrix-row matrix-row-header";
+  headerRow.style.gridTemplateColumns = `240px repeat(${state.categories.length}, minmax(140px, 1fr))`;
+
+  const corner = document.createElement("div");
+  corner.className = "matrix-corner";
+  corner.innerHTML = `
+    <p class="matrix-corner-label">Place</p>
+    <p class="matrix-corner-copy">Rows are GPS groups within 10 meters.</p>
+  `;
+  headerRow.append(corner);
 
   state.categories.forEach((category) => {
-    categoryGrid.append(buildCategoryCard(category));
+    const cell = document.createElement("div");
+    cell.className = "matrix-header-cell";
+
+    const key = document.createElement("p");
+    key.className = "matrix-header-key";
+    key.textContent = category.key;
+
+    const title = document.createElement("h3");
+    title.className = "matrix-header-title";
+    title.textContent = category.label;
+
+    cell.append(key, title);
+    headerRow.append(cell);
   });
+
+  return headerRow;
+}
+
+function createPlaceLabel(group, index) {
+  const label = document.createElement("aside");
+  label.className = "matrix-row-label";
+
+  const name = document.createElement("h3");
+  name.className = "matrix-place-title";
+  name.textContent = group.place_name || `Place ${index + 1}`;
+
+  const count = document.createElement("p");
+  count.className = "matrix-place-count";
+  count.textContent = `${group.count} items`;
+
+  const address = document.createElement("p");
+  address.className = "matrix-place-address";
+  address.textContent = group.address || "No matched place name";
+
+  const coords = document.createElement("p");
+  coords.className = "matrix-place-coords";
+  coords.textContent = group.center
+    ? `${group.center.latitude}, ${group.center.longitude}`
+    : "No GPS center";
+
+  label.append(name, count, address, coords);
+  return label;
+}
+
+function renderMatrixBoard() {
+  matrixBoard.innerHTML = "";
+
+  if (!state.categories.length) {
+    matrixBoard.append(createEmptyState("No categories"));
+    return;
+  }
+
+  const board = document.createElement("div");
+  board.className = "matrix-grid";
+  board.append(createHeaderRow());
+
+  const rows = [...state.locationGroups];
+  const noGpsRow = buildNoGpsRow();
+  if (noGpsRow.count > 0) {
+    rows.push(noGpsRow);
+  }
+
+  if (!rows.length) {
+    matrixBoard.append(createEmptyState("No uploaded items"));
+    return;
+  }
+
+  rows.forEach((group, index) => {
+    const row = document.createElement("div");
+    row.className = "matrix-row";
+    row.dataset.rowId = group.group_id;
+    row.style.gridTemplateColumns = `240px repeat(${state.categories.length}, minmax(140px, 1fr))`;
+    row.append(createPlaceLabel(group, index));
+
+    const grouped = groupItemsByCategory(group.items || []);
+    state.categories.forEach((category) => {
+      row.append(createMatrixCell(category.key, group.group_id, grouped[category.key] || []));
+    });
+
+    board.append(row);
+  });
+
+  matrixBoard.append(board);
 }
 
 function updateSummaryStats(totalCount) {
-  summaryStats.textContent = `${totalCount}개 항목 / ${state.categories.length}개 카테고리`;
+  const gpsCount = state.locationGroups.length;
+  summaryStats.textContent = `${totalCount} items / ${state.categories.length} categories / ${gpsCount} GPS groups`;
 }
 
 function waitForRenderedImages() {
   const images = Array.from(document.querySelectorAll(".image-preview"));
-  if (images.length === 0) {
+  if (!images.length) {
     return Promise.resolve();
   }
 
@@ -427,21 +607,19 @@ async function saveAssignments() {
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      assignments: state.assignments,
-    }),
+    body: JSON.stringify({ assignments: state.assignments }),
   });
 
   const payload = await response.json();
   if (!response.ok) {
-    throw new Error(payload.detail || "라벨 저장에 실패했습니다.");
+    throw new Error(payload.detail || "Failed to save labels.");
   }
 
   state.assignments = payload.assignments || {};
 }
 
 async function trainCurrentAssignments() {
-  showResultsLoading("학습 중입니다", "현재 화면의 분류 결과를 저장하고 모델에 반영하는 중입니다.");
+  showResultsLoading("Training", "Saving current labels and retraining the classifier.");
   trainButton.disabled = true;
 
   try {
@@ -452,20 +630,18 @@ async function trainCurrentAssignments() {
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        assignments: state.assignments,
-      }),
+      body: JSON.stringify({ assignments: state.assignments }),
     });
 
     const payload = await response.json();
     if (!response.ok) {
-      throw new Error(payload.detail || "학습에 실패했습니다.");
+      throw new Error(payload.detail || "Training failed.");
     }
 
-    setEditorStatus(`학습이 완료되었습니다. ${payload.trained_count}개 항목이 반영되었습니다.`, "success");
+    setEditorStatus(`Training completed. ${payload.trained_count} items were used.`, "success");
     await loadResults();
   } catch (error) {
-    setEditorStatus(error.message || "학습 중 오류가 발생했습니다.", "error");
+    setEditorStatus(error.message || "Training failed.", "error");
   } finally {
     trainButton.disabled = false;
     hideResultsLoading();
@@ -475,17 +651,19 @@ async function trainCurrentAssignments() {
 async function loadResults() {
   const response = await fetch("/images/categorized");
   if (!response.ok) {
-    throw new Error("분류 결과를 불러오지 못했습니다.");
+    throw new Error("Failed to load categorized results.");
   }
 
   const result = await response.json();
   state.categories = result.categories || [];
   state.groupedImages = result.grouped_images || {};
+  state.locationGroups = result.location_groups || [];
   state.assignments = result.assignments || {};
+
   updateAssignmentsFromGroups();
   updateSummaryStats(result.total_count || 0);
   renderClassifierStatus();
-  renderCategories();
+  renderMatrixBoard();
   await waitForRenderedImages();
 }
 
@@ -496,7 +674,7 @@ async function init() {
   const lastUploadResult = readLastUploadResult();
   renderUploadSummary(lastUploadResult);
   renderWarnings(lastUploadResult);
-  setEditorStatus("카드를 다른 카테고리로 옮긴 뒤 학습 버튼을 누르면 수정한 결과가 저장되고 다음 분류에 반영됩니다.", "info");
+  setEditorStatus("Drag thumbnails across columns inside the same GPS row, then click Train.", "info");
 
   try {
     await loadResults();
@@ -504,9 +682,8 @@ async function init() {
       sessionStorage.removeItem("lastUploadResult");
     }
   } catch (error) {
-    uploadSummary.innerHTML =
-      '<div class="summary-chip summary-chip-error">결과를 불러오지 못했습니다.</div>';
-    setEditorStatus(error.message || "결과 화면을 초기화하지 못했습니다.", "error");
+    uploadSummary.innerHTML = '<div class="summary-chip summary-chip-error">Failed to load results.</div>';
+    setEditorStatus(error.message || "Failed to initialize results.", "error");
   } finally {
     hideResultsLoading();
   }
