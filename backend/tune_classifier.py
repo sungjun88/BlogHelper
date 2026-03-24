@@ -13,14 +13,20 @@ if str(REPO_ROOT) not in sys.path:
 try:
     from backend.image_classifier import (  # noqa: E402
         CATEGORY_DEFINITIONS,
+        TRAINED_MODEL_PATH,
         classify_image,
+        get_trained_embedding_classifier,
         list_uploaded_images,
+        train_embedding_classifier,
     )
 except ModuleNotFoundError:
     from image_classifier import (  # noqa: E402
         CATEGORY_DEFINITIONS,
+        TRAINED_MODEL_PATH,
         classify_image,
+        get_trained_embedding_classifier,
         list_uploaded_images,
+        train_embedding_classifier,
     )
 
 
@@ -30,24 +36,34 @@ DEFAULT_LABELS_FILE = REPO_ROOT / "backend" / "tuning_labels.json"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="음식점 사진 분류기 튜닝용 평가 스크립트",
+        description="Evaluate and train the BlogHelper image classifier.",
     )
     parser.add_argument(
         "--image-dir",
         type=Path,
         default=DEFAULT_IMAGE_DIR,
-        help="평가할 이미지 폴더 경로",
+        help="Directory containing training or evaluation images.",
     )
     parser.add_argument(
         "--labels-file",
         type=Path,
         default=DEFAULT_LABELS_FILE,
-        help="정답 라벨 JSON 파일 경로",
+        help="JSON file containing the ground-truth labels.",
     )
     parser.add_argument(
         "--init-labels",
         action="store_true",
-        help="현재 이미지 기준으로 라벨 파일 초안을 생성하거나 갱신",
+        help="Create or refresh the label template from the image directory.",
+    )
+    parser.add_argument(
+        "--train",
+        action="store_true",
+        help="Train the CLIP embedding prototype classifier from labeled images.",
+    )
+    parser.add_argument(
+        "--show-model",
+        action="store_true",
+        help="Print the currently saved trained model summary.",
     )
     return parser.parse_args()
 
@@ -58,7 +74,7 @@ def load_labels(labels_file: Path) -> dict[str, dict[str, str]]:
 
     data = json.loads(labels_file.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError("라벨 파일 최상위 구조는 객체(JSON object)여야 합니다.")
+        raise ValueError("Label file must be a JSON object keyed by filename.")
     return data
 
 
@@ -79,37 +95,48 @@ def save_labels_template(image_dir: Path, labels_file: Path) -> None:
     )
 
 
-def evaluate_predictions(image_dir: Path, labels_file: Path) -> int:
+def collect_labeled_paths(
+    image_dir: Path,
+    labels_file: Path,
+) -> tuple[list[tuple[Path, str]], list[str], list[tuple[str, str]]]:
     labels = load_labels(labels_file)
     valid_categories = {category.key for category in CATEGORY_DEFINITIONS}
-    enabled_categories = [category.key for category in CATEGORY_DEFINITIONS if category.enabled]
 
-    labeled_paths = []
-    skipped_files = []
-    invalid_labels = []
+    labeled_paths: list[tuple[Path, str]] = []
+    skipped_files: list[str] = []
+    invalid_labels: list[tuple[str, str]] = []
 
     for image_path in list_uploaded_images(image_dir):
         entry = labels.get(image_path.name)
         if not entry or not entry.get("label"):
             skipped_files.append(image_path.name)
             continue
+
         label = entry["label"]
         if label not in valid_categories:
             invalid_labels.append((image_path.name, label))
             continue
+
         labeled_paths.append((image_path, label))
 
+    return labeled_paths, skipped_files, invalid_labels
+
+
+def evaluate_predictions(image_dir: Path, labels_file: Path) -> int:
+    labeled_paths, skipped_files, invalid_labels = collect_labeled_paths(image_dir, labels_file)
+    enabled_categories = [category.key for category in CATEGORY_DEFINITIONS if category.enabled]
+
     if invalid_labels:
-        print("유효하지 않은 라벨이 있습니다.")
+        print("Invalid labels were found:")
         for filename, label in invalid_labels:
             print(f"- {filename}: {label}")
-        print(f"허용 카테고리: {', '.join(sorted(valid_categories))}")
+        print(f"Allowed categories: {', '.join(sorted(category.key for category in CATEGORY_DEFINITIONS))}")
         return 1
 
     if not labeled_paths:
-        print("평가할 라벨이 없습니다.")
-        print("먼저 다음 명령으로 라벨 파일 초안을 만드세요:")
-        print("backend\\venv\\Scripts\\python.exe backend\\tune_classifier.py --init-labels")
+        print("No labeled images were found.")
+        print("Run this first to generate a label template:")
+        print(r".venv\Scripts\python.exe backend\tune_classifier.py --init-labels")
         return 1
 
     total = 0
@@ -118,10 +145,12 @@ def evaluate_predictions(image_dir: Path, labels_file: Path) -> int:
     per_label_correct = Counter()
     confusion: dict[str, Counter[str]] = defaultdict(Counter)
     misclassified = []
+    classifier_counts = Counter()
 
     for image_path, expected_label in labeled_paths:
         result = classify_image(image_path)
         predicted_label = result["category"]
+        classifier_counts[result["features"].get("classifier", "unknown")] += 1
 
         total += 1
         per_label_total[expected_label] += 1
@@ -142,6 +171,7 @@ def evaluate_predictions(image_dir: Path, labels_file: Path) -> int:
                 "filename": image_path.name,
                 "expected": expected_label,
                 "predicted": predicted_label,
+                "classifier": result["features"].get("classifier", "unknown"),
                 "confidence": result["confidence"],
                 "scores": ranked_scores[:3],
             }
@@ -149,25 +179,27 @@ def evaluate_predictions(image_dir: Path, labels_file: Path) -> int:
 
     accuracy = correct / total if total else 0.0
 
-    print("평가 결과")
-    print(f"- 이미지 수: {total}")
-    print(f"- 정확도: {accuracy:.2%} ({correct}/{total})")
+    print("Evaluation summary")
+    print(f"- labeled images: {total}")
+    print(f"- unlabeled images skipped: {len(skipped_files)}")
+    print(f"- accuracy: {accuracy:.2%} ({correct}/{total})")
+    print(f"- classifiers used: {dict(classifier_counts)}")
     print("")
 
-    print("카테고리별 정확도")
+    print("Per-category accuracy")
     for category in CATEGORY_DEFINITIONS:
         label_key = category.key
         if per_label_total[label_key] == 0:
             continue
         category_accuracy = per_label_correct[label_key] / per_label_total[label_key]
-        suffix = " [비활성]" if label_key not in enabled_categories else ""
+        suffix = " [disabled]" if label_key not in enabled_categories else ""
         print(
             f"- {label_key}: {category_accuracy:.2%} "
             f"({per_label_correct[label_key]}/{per_label_total[label_key]}){suffix}"
         )
     print("")
 
-    print("혼동표")
+    print("Confusion")
     for expected_label in sorted(confusion):
         row = ", ".join(
             f"{predicted}:{count}"
@@ -177,20 +209,69 @@ def evaluate_predictions(image_dir: Path, labels_file: Path) -> int:
     print("")
 
     if misclassified:
-        print("오분류 상세")
+        print("Misclassified samples")
         for item in misclassified:
             score_text = ", ".join(
                 f"{category}:{score:.4f}"
                 for category, score in item["scores"]
             )
             print(
-                f"- {item['filename']} | expected={item['expected']} "
-                f"predicted={item['predicted']} confidence={item['confidence']:.4f}"
+                f"- {item['filename']} | expected={item['expected']} predicted={item['predicted']} "
+                f"classifier={item['classifier']} confidence={item['confidence']:.4f}"
             )
             print(f"  top_scores: {score_text}")
     else:
-        print("오분류 없음")
+        print("No misclassifications found.")
 
+    return 0
+
+
+def train_model(image_dir: Path, labels_file: Path) -> int:
+    labeled_paths, skipped_files, invalid_labels = collect_labeled_paths(image_dir, labels_file)
+
+    if invalid_labels:
+        print("Invalid labels were found:")
+        for filename, label in invalid_labels:
+            print(f"- {filename}: {label}")
+        return 1
+
+    if not labeled_paths:
+        print("No labeled images were found.")
+        return 1
+
+    label_counts = Counter(label for _, label in labeled_paths)
+    low_sample_labels = [label for label, count in label_counts.items() if count < 2]
+    if low_sample_labels:
+        print("Some labels have fewer than 2 samples. Training may be unstable:")
+        for label in low_sample_labels:
+            print(f"- {label}: {label_counts[label]}")
+
+    summary = train_embedding_classifier(labeled_paths)
+
+    print("Training completed")
+    print(f"- model path: {summary['model_path']}")
+    print(f"- model id: {summary['model_id']}")
+    print(f"- labeled images used: {len(labeled_paths)}")
+    print(f"- unlabeled images skipped: {len(skipped_files)}")
+    print(f"- sample counts: {summary['sample_counts']}")
+    print("")
+    print("Run the evaluator again to check whether accuracy improved:")
+    print(r".venv\Scripts\python.exe backend\tune_classifier.py")
+    return 0
+
+
+def show_model_summary() -> int:
+    classifier = get_trained_embedding_classifier()
+    if not classifier.is_available():
+        print(f"No trained model found at: {TRAINED_MODEL_PATH}")
+        return 1
+
+    summary = classifier.summary()
+    print("Trained model summary")
+    print(f"- model path: {summary['model_path']}")
+    print(f"- model id: {summary['model_id']}")
+    print(f"- categories: {', '.join(summary['category_keys'])}")
+    print(f"- sample counts: {summary['sample_counts']}")
     return 0
 
 
@@ -200,15 +281,21 @@ def main() -> int:
     labels_file = args.labels_file.resolve()
 
     if not image_dir.exists():
-        print(f"이미지 폴더를 찾을 수 없습니다: {image_dir}")
+        print(f"Image directory not found: {image_dir}")
         return 1
 
     if args.init_labels:
         save_labels_template(image_dir, labels_file)
-        print(f"라벨 파일 초안을 생성했습니다: {labels_file}")
-        print("각 파일의 label 값을 정답 카테고리로 채운 뒤 다시 실행하세요.")
-        print("예: exterior, parking, interior, menu, food, thumbnail")
+        print(f"Label template saved to: {labels_file}")
+        print("Fill in the label field for each image, then rerun training or evaluation.")
+        print("Available categories: exterior, parking, interior, menu, food, thumbnail")
         return 0
+
+    if args.show_model:
+        return show_model_summary()
+
+    if args.train:
+        return train_model(image_dir, labels_file)
 
     return evaluate_predictions(image_dir, labels_file)
 

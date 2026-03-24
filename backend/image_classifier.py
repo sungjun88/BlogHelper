@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -12,6 +14,12 @@ from PIL import Image
 ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 DEFAULT_CLIP_MODEL_ID = os.getenv("BLOGHELPER_CLIP_MODEL_ID", "openai/clip-vit-base-patch32")
 CLASSIFIER_MODE = os.getenv("BLOGHELPER_CLASSIFIER_MODE", "auto").lower()
+TRAINED_MODEL_PATH = Path(
+    os.getenv(
+        "BLOGHELPER_TRAINED_MODEL_PATH",
+        Path(__file__).resolve().parent / "trained_classifier.npz",
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -26,18 +34,18 @@ class CategoryDefinition:
 CATEGORY_DEFINITIONS: tuple[CategoryDefinition, ...] = (
     CategoryDefinition(
         key="thumbnail",
-        label="썸네일용",
+        label="Thumbnail",
         enabled=False,
         prompts=(
             "a dramatic hero shot of a restaurant dish for a blog thumbnail",
             "a visually striking close-up food photo for a cover image",
             "a main featured dish photo with strong visual appeal",
         ),
-        notes="기본값은 비활성화되어 있으며, 필요할 때만 활성화하세요.",
+        notes="Disabled by default because it overlaps with food unless you curate labels carefully.",
     ),
     CategoryDefinition(
         key="exterior",
-        label="외부전경",
+        label="Exterior",
         enabled=True,
         prompts=(
             "the exterior of a restaurant building",
@@ -47,7 +55,7 @@ CATEGORY_DEFINITIONS: tuple[CategoryDefinition, ...] = (
     ),
     CategoryDefinition(
         key="parking",
-        label="주차장",
+        label="Parking",
         enabled=True,
         prompts=(
             "a restaurant parking lot",
@@ -57,7 +65,7 @@ CATEGORY_DEFINITIONS: tuple[CategoryDefinition, ...] = (
     ),
     CategoryDefinition(
         key="interior",
-        label="내부",
+        label="Interior",
         enabled=True,
         prompts=(
             "the interior of a restaurant dining space",
@@ -67,7 +75,7 @@ CATEGORY_DEFINITIONS: tuple[CategoryDefinition, ...] = (
     ),
     CategoryDefinition(
         key="menu",
-        label="메뉴",
+        label="Menu",
         enabled=True,
         prompts=(
             "a restaurant menu board",
@@ -77,7 +85,7 @@ CATEGORY_DEFINITIONS: tuple[CategoryDefinition, ...] = (
     ),
     CategoryDefinition(
         key="food",
-        label="음식",
+        label="Food",
         enabled=True,
         prompts=(
             "a plated dish served at a restaurant",
@@ -96,6 +104,20 @@ def _positive(value: float) -> float:
     return max(value, 0.0)
 
 
+def _softmax(values: np.ndarray) -> np.ndarray:
+    shifted = values - np.max(values)
+    exp = np.exp(shifted)
+    return exp / exp.sum()
+
+
+def _extract_clip_embedding(output: Any):
+    if hasattr(output, "pooler_output") and output.pooler_output is not None:
+        return output.pooler_output
+    if isinstance(output, tuple) and output:
+        return output[0]
+    return output
+
+
 def get_enabled_categories() -> list[CategoryDefinition]:
     return [category for category in CATEGORY_DEFINITIONS if category.enabled]
 
@@ -108,40 +130,63 @@ def list_uploaded_images(upload_dir: Path) -> list[Path]:
     )
 
 
+def get_classifier_status() -> dict[str, str]:
+    if CLASSIFIER_MODE == "heuristic":
+        return {"mode": "heuristic", "detail": "Forced heuristic mode by environment variable."}
+
+    if _TRAINED_EMBEDDING_CLASSIFIER.is_available():
+        return {
+            "mode": "trained_clip",
+            "detail": f"Trained prototype classifier loaded from {TRAINED_MODEL_PATH.name}",
+        }
+
+    try:
+        _LOCAL_CLIP_CLASSIFIER.ensure_loaded()
+    except Exception as exc:  # pragma: no cover - depends on local model availability
+        return {"mode": "heuristic", "detail": str(exc)}
+
+    return {
+        "mode": "local_clip",
+        "detail": f"{_LOCAL_CLIP_CLASSIFIER.model_id} on {_LOCAL_CLIP_CLASSIFIER.device}",
+    }
+
+
 def get_category_metadata() -> list[dict[str, str | bool]]:
-    clip_status = get_classifier_status()
+    classifier_status = get_classifier_status()
     return [
         {
             "key": category.key,
             "label": category.label,
             "enabled": category.enabled,
             "notes": category.notes,
-            "classifier_mode": clip_status["mode"],
+            "classifier_mode": classifier_status["mode"],
         }
         for category in CATEGORY_DEFINITIONS
     ]
 
 
-class LocalCLIPClassifier:
+class LocalCLIPEncoder:
     def __init__(self, model_id: str = DEFAULT_CLIP_MODEL_ID):
         self.model_id = model_id
         self._model = None
         self._processor = None
         self._torch = None
         self._device = None
-        self._prompt_keys: list[str] = []
-        self._text_features = None
 
-    def _ensure_loaded(self) -> None:
+    @property
+    def device(self) -> str | None:
+        return self._device
+
+    def ensure_loaded(self) -> None:
         if self._model is not None:
             return
 
         try:
             import torch
             from transformers import CLIPModel, CLIPProcessor
-        except ImportError as exc:
+        except ImportError as exc:  # pragma: no cover - local dependency dependent
             raise LocalCLIPUnavailable(
-                "로컬 CLIP 분류를 쓰려면 torch와 transformers 설치가 필요합니다."
+                "Local CLIP requires torch and transformers to be installed."
             ) from exc
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -154,23 +199,11 @@ class LocalCLIPClassifier:
         self._device = device
         self._model = model
         self._processor = processor
-        self._build_text_features()
 
-    def _build_text_features(self) -> None:
-        categories = get_enabled_categories()
-        prompts = [
-            prompt
-            for category in categories
-            for prompt in category.prompts
-        ]
-        prompt_keys = [
-            category.key
-            for category in categories
-            for _prompt in category.prompts
-        ]
-
+    def encode_texts(self, texts: list[str]) -> np.ndarray:
+        self.ensure_loaded()
         inputs = self._processor(
-            text=prompts,
+            text=texts,
             return_tensors="pt",
             padding=True,
             truncation=True,
@@ -179,22 +212,55 @@ class LocalCLIPClassifier:
 
         with self._torch.no_grad():
             text_features = self._model.get_text_features(**inputs)
+            text_features = _extract_clip_embedding(text_features)
             text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
 
-        self._prompt_keys = prompt_keys
-        self._text_features = text_features
+        return text_features.detach().cpu().numpy().astype(np.float32)
 
-    def classify(self, image_path: Path) -> dict:
-        self._ensure_loaded()
-
+    def encode_image(self, image_path: Path) -> np.ndarray:
+        self.ensure_loaded()
         image = Image.open(image_path).convert("RGB")
         inputs = self._processor(images=image, return_tensors="pt")
         inputs = {key: value.to(self._device) for key, value in inputs.items()}
 
         with self._torch.no_grad():
             image_features = self._model.get_image_features(**inputs)
+            image_features = _extract_clip_embedding(image_features)
             image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
-            prompt_scores = (image_features @ self._text_features.T).squeeze(0)
+
+        return image_features.detach().cpu().numpy()[0].astype(np.float32)
+
+
+class LocalCLIPClassifier:
+    def __init__(self, encoder: LocalCLIPEncoder):
+        self.encoder = encoder
+        self._prompt_keys: list[str] = []
+        self._text_features: np.ndarray | None = None
+
+    @property
+    def model_id(self) -> str:
+        return self.encoder.model_id
+
+    @property
+    def device(self) -> str | None:
+        return self.encoder.device
+
+    def ensure_loaded(self) -> None:
+        self.encoder.ensure_loaded()
+        if self._text_features is None:
+            self._build_text_features()
+
+    def _build_text_features(self) -> None:
+        categories = get_enabled_categories()
+        prompts = [prompt for category in categories for prompt in category.prompts]
+        prompt_keys = [category.key for category in categories for _ in category.prompts]
+        self._text_features = self.encoder.encode_texts(prompts)
+        self._prompt_keys = prompt_keys
+
+    def classify(self, image_path: Path) -> dict:
+        self.ensure_loaded()
+        image_features = self.encoder.encode_image(image_path)
+        prompt_scores = np.matmul(self._text_features, image_features)
 
         grouped_scores: dict[str, list[float]] = {}
         for key, score in zip(self._prompt_keys, prompt_scores.tolist()):
@@ -205,21 +271,8 @@ class LocalCLIPClassifier:
             for key, values in grouped_scores.items()
         }
         predicted_category = max(averaged_scores, key=averaged_scores.get)
-
-        score_values = np.array(list(averaged_scores.values()), dtype=np.float32)
-        normalized_scores = _softmax(score_values)
-        category_keys = list(averaged_scores.keys())
-        probability_scores = {
-            key: round(float(score), 4)
-            for key, score in zip(category_keys, normalized_scores)
-        }
-
         category_lookup = {category.key: category for category in CATEGORY_DEFINITIONS}
-
-        reasons = [
-            f"로컬 CLIP 모델({self.model_id})이 이 이미지를 '{category_lookup[predicted_category].label}' 문장과 가장 가깝게 판단했습니다.",
-            f"장치: {self._device}",
-        ]
+        probability_scores = _normalize_score_dict(averaged_scores)
 
         return {
             "filename": image_path.name,
@@ -227,19 +280,124 @@ class LocalCLIPClassifier:
             "category_label": category_lookup[predicted_category].label,
             "confidence": probability_scores[predicted_category],
             "scores": probability_scores,
-            "reasons": reasons,
+            "reasons": [
+                f"Zero-shot CLIP matched the image closest to {category_lookup[predicted_category].label}.",
+                f"Device: {self.device}",
+            ],
             "features": {
                 "classifier": "local_clip",
                 "model_id": self.model_id,
-                "device": self._device,
+                "device": self.device,
             },
         }
 
 
-def _softmax(values: np.ndarray) -> np.ndarray:
-    shifted = values - np.max(values)
-    exp = np.exp(shifted)
-    return exp / exp.sum()
+class TrainedEmbeddingClassifier:
+    def __init__(self, encoder: LocalCLIPEncoder, model_path: Path = TRAINED_MODEL_PATH):
+        self.encoder = encoder
+        self.model_path = model_path
+        self._loaded = False
+        self._category_keys: list[str] = []
+        self._category_labels: dict[str, str] = {}
+        self._centroids: np.ndarray | None = None
+        self._model_id: str | None = None
+        self._sample_counts: dict[str, int] = {}
+
+    def is_available(self) -> bool:
+        if not self.model_path.exists():
+            return False
+        self._ensure_loaded()
+        return self._centroids is not None and len(self._category_keys) > 0
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        if not self.model_path.exists():
+            return
+
+        data = np.load(self.model_path, allow_pickle=False)
+        raw_keys = data["category_keys"].tolist()
+        self._category_keys = [str(key) for key in raw_keys]
+        self._centroids = data["centroids"].astype(np.float32)
+        self._model_id = str(data["model_id"].tolist())
+        counts = data["sample_counts"].astype(np.int32).tolist()
+        self._sample_counts = {
+            key: int(count)
+            for key, count in zip(self._category_keys, counts)
+        }
+        self._category_labels = {
+            category.key: category.label
+            for category in CATEGORY_DEFINITIONS
+        }
+
+    def classify(self, image_path: Path) -> dict:
+        self._ensure_loaded()
+        if self._centroids is None or not self._category_keys:
+            raise LocalCLIPUnavailable("No trained embedding classifier is available.")
+
+        image_embedding = self.encoder.encode_image(image_path)
+        scores = np.matmul(self._centroids, image_embedding)
+        raw_scores = {
+            key: float(score)
+            for key, score in zip(self._category_keys, scores.tolist())
+        }
+        normalized_scores = _normalize_score_dict(raw_scores)
+        predicted_category = max(normalized_scores, key=normalized_scores.get)
+
+        return {
+            "filename": image_path.name,
+            "category": predicted_category,
+            "category_label": self._category_labels[predicted_category],
+            "confidence": normalized_scores[predicted_category],
+            "scores": normalized_scores,
+            "reasons": [
+                f"Trained CLIP embedding classifier selected {self._category_labels[predicted_category]}.",
+                f"Training samples for class: {self._sample_counts.get(predicted_category, 0)}",
+            ],
+            "features": {
+                "classifier": "trained_clip",
+                "model_id": self._model_id or self.encoder.model_id,
+                "training_samples": self._sample_counts.get(predicted_category, 0),
+            },
+        }
+
+    def save(
+        self,
+        category_keys: list[str],
+        centroids: np.ndarray,
+        sample_counts: list[int],
+        model_id: str,
+    ) -> None:
+        self.model_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            self.model_path,
+            category_keys=np.array(category_keys, dtype="<U32"),
+            centroids=centroids.astype(np.float32),
+            sample_counts=np.array(sample_counts, dtype=np.int32),
+            model_id=np.array(model_id),
+        )
+        self._loaded = False
+        self._ensure_loaded()
+
+    def summary(self) -> dict[str, Any]:
+        self._ensure_loaded()
+        return {
+            "model_path": str(self.model_path),
+            "model_id": self._model_id,
+            "category_keys": self._category_keys,
+            "sample_counts": self._sample_counts,
+        }
+
+
+def _normalize_score_dict(raw_scores: dict[str, float]) -> dict[str, float]:
+    category_keys = list(raw_scores.keys())
+    score_values = np.array(list(raw_scores.values()), dtype=np.float32)
+    normalized_scores = _softmax(score_values)
+    return {
+        key: round(float(score), 4)
+        for key, score in zip(category_keys, normalized_scores)
+    }
 
 
 def _extract_image_features(image_path: Path) -> dict[str, float]:
@@ -353,13 +511,8 @@ def _classify_with_heuristics(image_path: Path) -> dict:
     features = _extract_image_features(image_path)
     raw_scores = _heuristic_scores(features)
     predicted_category = max(raw_scores, key=raw_scores.get)
-    probabilities = _softmax(np.array(list(raw_scores.values()), dtype=np.float32))
-    category_keys = list(raw_scores.keys())
-    scores = {
-        key: round(float(probability), 4)
-        for key, probability in zip(category_keys, probabilities)
-    }
     category_lookup = {category.key: category for category in CATEGORY_DEFINITIONS}
+    scores = _normalize_score_dict(raw_scores)
 
     return {
         "filename": image_path.name,
@@ -368,8 +521,8 @@ def _classify_with_heuristics(image_path: Path) -> dict:
         "confidence": scores[predicted_category],
         "scores": scores,
         "reasons": [
-            "로컬 CLIP 모델이 설치되지 않아 임시 규칙 기반 분류기를 사용했습니다.",
-            "데스크톱에서 torch와 transformers를 설치하면 CLIP 분류가 자동으로 활성화됩니다.",
+            "Fell back to heuristic rules because CLIP was unavailable.",
+            "For better quality, collect labels and train the embedding classifier.",
         ],
         "features": {
             key: round(value, 4)
@@ -378,22 +531,53 @@ def _classify_with_heuristics(image_path: Path) -> dict:
     }
 
 
-_LOCAL_CLIP_CLASSIFIER = LocalCLIPClassifier()
+_LOCAL_CLIP_ENCODER = LocalCLIPEncoder()
+_LOCAL_CLIP_CLASSIFIER = LocalCLIPClassifier(_LOCAL_CLIP_ENCODER)
+_TRAINED_EMBEDDING_CLASSIFIER = TrainedEmbeddingClassifier(_LOCAL_CLIP_ENCODER)
 
 
-def get_classifier_status() -> dict[str, str]:
-    if CLASSIFIER_MODE == "heuristic":
-        return {"mode": "heuristic", "detail": "환경 변수로 휴리스틱 분류기가 강제되었습니다."}
+def get_clip_encoder() -> LocalCLIPEncoder:
+    return _LOCAL_CLIP_ENCODER
 
-    try:
-        _LOCAL_CLIP_CLASSIFIER._ensure_loaded()
-    except LocalCLIPUnavailable as exc:
-        return {"mode": "heuristic", "detail": str(exc)}
 
-    return {
-        "mode": "local_clip",
-        "detail": f"{_LOCAL_CLIP_CLASSIFIER.model_id} on {_LOCAL_CLIP_CLASSIFIER._device}",
-    }
+def get_trained_embedding_classifier() -> TrainedEmbeddingClassifier:
+    return _TRAINED_EMBEDDING_CLASSIFIER
+
+
+def train_embedding_classifier(
+    labeled_items: list[tuple[Path, str]],
+    output_path: Path = TRAINED_MODEL_PATH,
+) -> dict[str, Any]:
+    if not labeled_items:
+        raise ValueError("No labeled items were provided for training.")
+
+    category_to_embeddings: dict[str, list[np.ndarray]] = {}
+    encoder = get_clip_encoder()
+
+    for image_path, label in labeled_items:
+        embedding = encoder.encode_image(image_path)
+        category_to_embeddings.setdefault(label, []).append(embedding)
+
+    category_keys = sorted(category_to_embeddings)
+    centroids = []
+    sample_counts = []
+
+    for key in category_keys:
+        embeddings = np.stack(category_to_embeddings[key], axis=0)
+        centroid = embeddings.mean(axis=0)
+        centroid = centroid / np.linalg.norm(centroid)
+        centroids.append(centroid.astype(np.float32))
+        sample_counts.append(int(embeddings.shape[0]))
+
+    classifier = TrainedEmbeddingClassifier(encoder, output_path)
+    classifier.save(
+        category_keys=category_keys,
+        centroids=np.stack(centroids, axis=0),
+        sample_counts=sample_counts,
+        model_id=encoder.model_id,
+    )
+
+    return classifier.summary()
 
 
 def classify_image(image_path: Path) -> dict:
@@ -401,6 +585,12 @@ def classify_image(image_path: Path) -> dict:
         return _classify_with_heuristics(image_path)
 
     try:
+        if _TRAINED_EMBEDDING_CLASSIFIER.is_available():
+            return _TRAINED_EMBEDDING_CLASSIFIER.classify(image_path)
+    except Exception:
+        pass
+
+    try:
         return _LOCAL_CLIP_CLASSIFIER.classify(image_path)
-    except LocalCLIPUnavailable:
+    except Exception:
         return _classify_with_heuristics(image_path)

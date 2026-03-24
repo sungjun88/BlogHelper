@@ -1,5 +1,6 @@
 const summaryStats = document.querySelector("#summaryStats");
 const uploadSummary = document.querySelector("#uploadSummary");
+const classifierStatus = document.querySelector("#classifierStatus");
 const warnings = document.querySelector("#warnings");
 const categoryGrid = document.querySelector("#categoryGrid");
 const categoryTemplate = document.querySelector("#categoryTemplate");
@@ -89,6 +90,47 @@ function renderWarnings(result) {
   });
 }
 
+function getClassifierInfo(image) {
+  if (image?.features?.classifier === "local_clip") {
+    return {
+      label: "CLIP AI 분류",
+      className: "is-clip",
+    };
+  }
+
+  return {
+    label: "휴리스틱 분류",
+    className: "is-heuristic",
+  };
+}
+
+function renderClassifierStatus() {
+  const images = Object.values(state.groupedImages).flat();
+
+  if (images.length === 0) {
+    classifierStatus.innerHTML = "";
+    return;
+  }
+
+  const allClip = images.every((image) => image?.features?.classifier === "local_clip");
+  const someClip = images.some((image) => image?.features?.classifier === "local_clip");
+
+  if (allClip) {
+    classifierStatus.innerHTML =
+      '<div class="classifier-chip is-clip">현재 결과는 모두 CLIP AI로 분류되었습니다.</div>';
+    return;
+  }
+
+  if (someClip) {
+    classifierStatus.innerHTML =
+      '<div class="classifier-chip is-mixed">현재 결과에는 CLIP AI와 휴리스틱 분류가 함께 포함되어 있습니다.</div>';
+    return;
+  }
+
+  classifierStatus.innerHTML =
+    '<div class="classifier-chip is-heuristic">현재 결과는 모두 휴리스틱 규칙 기반으로 분류되었습니다.</div>';
+}
+
 function createEmptyState() {
   const empty = document.createElement("div");
   empty.className = "category-empty";
@@ -122,10 +164,14 @@ function renderCategories() {
           const imageElement = imageFragment.querySelector(".image-preview");
           const nameElement = imageFragment.querySelector(".image-name");
           const confidenceElement = imageFragment.querySelector(".image-confidence");
+          const classifierElement = imageFragment.querySelector(".image-classifier");
+          const classifierInfo = getClassifierInfo(image);
 
           imageElement.src = image.image_url;
           imageElement.alt = image.filename;
           nameElement.textContent = image.filename;
+          classifierElement.textContent = classifierInfo.label;
+          classifierElement.className = `image-classifier ${classifierInfo.className}`;
           confidenceElement.textContent = `신뢰도 ${Math.round((image.confidence || 0) * 100)}%`;
 
           itemsContainer.append(imageFragment);
@@ -171,6 +217,7 @@ async function loadResults() {
   state.categories = result.categories || [];
   state.groupedImages = result.grouped_images || {};
   updateSummaryStats(result.total_count || 0);
+  renderClassifierStatus();
   renderCategories();
   await waitForRenderedImages();
 }
