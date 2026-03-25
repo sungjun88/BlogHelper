@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -11,6 +16,8 @@ from urllib.request import Request, urlopen
 
 from PIL import ExifTags, Image
 
+LOGGER = logging.getLogger("bloghelper")
+REQUEST_STEP_TIMINGS: ContextVar[dict[str, float] | None] = ContextVar("request_step_timings", default=None)
 
 PLACE_LOOKUP_ENABLED = os.getenv("BLOGHELPER_PLACE_LOOKUP_ENABLED", "1").lower() not in {"0", "false", "no"}
 PLACE_LOOKUP_TIMEOUT = float(os.getenv("BLOGHELPER_PLACE_LOOKUP_TIMEOUT", "8"))
@@ -25,6 +32,45 @@ OVERPASS_API_URL = os.getenv("BLOGHELPER_OVERPASS_API_URL", "https://overpass-ap
 
 GPS_TAG = next(key for key, value in ExifTags.TAGS.items() if value == "GPSInfo")
 GPS_NAME_BY_KEY = ExifTags.GPSTAGS
+CAPTURE_TIME_TAG_NAMES = ("DateTimeOriginal", "DateTimeDigitized", "DateTime")
+CAPTURE_TIME_TAG_IDS = tuple(
+    key
+    for key, value in ExifTags.TAGS.items()
+    if value in CAPTURE_TIME_TAG_NAMES
+)
+
+
+def reset_request_step_timings() -> Token:
+    return REQUEST_STEP_TIMINGS.set({})
+
+
+def restore_request_step_timings(token: Token) -> None:
+    REQUEST_STEP_TIMINGS.reset(token)
+
+
+def log_request_step_timings() -> None:
+    timings = REQUEST_STEP_TIMINGS.get()
+    if not timings:
+        return
+
+    for step_name, elapsed_seconds in sorted(timings.items()):
+        LOGGER.info("%s 걸린시간 %.3fs", step_name, elapsed_seconds)
+
+
+def add_request_step_timing(step_name: str, elapsed_seconds: float) -> None:
+    timings = REQUEST_STEP_TIMINGS.get()
+    if timings is not None:
+        timings[step_name] = timings.get(step_name, 0.0) + elapsed_seconds
+
+
+@contextmanager
+def _record_timed_step(step_name: str):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed_seconds = time.perf_counter() - start
+        add_request_step_timing(step_name, elapsed_seconds)
 
 
 def _extract_gps_ifd(exif: Any, gps_raw: Any) -> dict[str, Any] | None:
@@ -69,34 +115,71 @@ def _dms_to_decimal(values: Any, ref: str) -> float | None:
 
 
 def extract_gps_info(image_path: Path) -> dict[str, float] | None:
+    with _record_timed_step("gps 값 확인절차"):
+        try:
+            with Image.open(image_path) as image:
+                exif = image.getexif()
+        except Exception:
+            return None
+
+        gps_raw = exif.get(GPS_TAG)
+        if not gps_raw:
+            return None
+
+        gps_ifd = _extract_gps_ifd(exif, gps_raw)
+        if not isinstance(gps_ifd, dict):
+            return None
+
+        gps_info = {
+            GPS_NAME_BY_KEY.get(key, key): value
+            for key, value in gps_ifd.items()
+        }
+
+        latitude = _dms_to_decimal(gps_info.get("GPSLatitude"), gps_info.get("GPSLatitudeRef", "N"))
+        longitude = _dms_to_decimal(gps_info.get("GPSLongitude"), gps_info.get("GPSLongitudeRef", "E"))
+        if latitude is None or longitude is None:
+            return None
+
+        return {
+            "latitude": round(latitude, 7),
+            "longitude": round(longitude, 7),
+        }
+
+
+def _parse_exif_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+
+    text = value.decode("utf-8", errors="ignore") if isinstance(value, bytes) else str(value)
+    text = text.strip()
+    if not text:
+        return None
+
     try:
-        with Image.open(image_path) as image:
-            exif = image.getexif()
-    except Exception:
+        return datetime.strptime(text, "%Y:%m:%d %H:%M:%S")
+    except ValueError:
         return None
 
-    gps_raw = exif.get(GPS_TAG)
-    if not gps_raw:
-        return None
 
-    gps_ifd = _extract_gps_ifd(exif, gps_raw)
-    if not isinstance(gps_ifd, dict):
-        return None
+def extract_capture_datetime(media_path: Path) -> datetime | None:
+    with _record_timed_step("촬영 시각 확인절차"):
+        if media_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+            try:
+                with Image.open(media_path) as image:
+                    exif = image.getexif()
+            except Exception:
+                exif = None
 
-    gps_info = {
-        GPS_NAME_BY_KEY.get(key, key): value
-        for key, value in gps_ifd.items()
-    }
+            if exif is not None:
+                for tag_id in CAPTURE_TIME_TAG_IDS:
+                    capture_time = _parse_exif_datetime(exif.get(tag_id))
+                    if capture_time is not None:
+                        return capture_time
 
-    latitude = _dms_to_decimal(gps_info.get("GPSLatitude"), gps_info.get("GPSLatitudeRef", "N"))
-    longitude = _dms_to_decimal(gps_info.get("GPSLongitude"), gps_info.get("GPSLongitudeRef", "E"))
-    if latitude is None or longitude is None:
-        return None
-
-    return {
-        "latitude": round(latitude, 7),
-        "longitude": round(longitude, 7),
-    }
+        try:
+            return datetime.fromtimestamp(media_path.stat().st_mtime)
+        except OSError:
+            return None
 
 
 def _fetch_json(url: str, params: dict[str, Any] | None = None, *, method: str = "GET", data: bytes | None = None) -> Any:
@@ -137,32 +220,33 @@ def reverse_geocode(lat: float, lon: float) -> dict[str, Any] | None:
     if not PLACE_LOOKUP_ENABLED:
         return None
 
-    try:
-        payload = _fetch_json(
-            NOMINATIM_REVERSE_URL,
-            {
-                "lat": lat,
-                "lon": lon,
-                "format": "jsonv2",
-                "addressdetails": 1,
-                "zoom": 18,
-                "namedetails": 1,
-            },
-        )
-    except (HTTPError, URLError, TimeoutError, ValueError):
-        return None
+    with _record_timed_step("역지오코딩 조회"):
+        try:
+            payload = _fetch_json(
+                NOMINATIM_REVERSE_URL,
+                {
+                    "lat": lat,
+                    "lon": lon,
+                    "format": "jsonv2",
+                    "addressdetails": 1,
+                    "zoom": 18,
+                    "namedetails": 1,
+                },
+            )
+        except (HTTPError, URLError, TimeoutError, ValueError):
+            return None
 
-    if not isinstance(payload, dict):
-        return None
+        if not isinstance(payload, dict):
+            return None
 
-    address = payload.get("address") or {}
-    return {
-        "display_name": payload.get("display_name"),
-        "name": payload.get("name") or payload.get("namedetails", {}).get("name"),
-        "category": payload.get("category"),
-        "type": payload.get("type"),
-        "address": address,
-    }
+        address = payload.get("address") or {}
+        return {
+            "display_name": payload.get("display_name"),
+            "name": payload.get("name") or payload.get("namedetails", {}).get("name"),
+            "category": payload.get("category"),
+            "type": payload.get("type"),
+            "address": address,
+        }
 
 
 def _build_overpass_query(lat: float, lon: float, radius_meters: float) -> str:
@@ -187,81 +271,83 @@ def find_nearest_places(lat: float, lon: float, limit: int = 3) -> list[dict[str
     if not PLACE_LOOKUP_ENABLED:
         return []
 
-    query = _build_overpass_query(lat, lon, PLACE_LOOKUP_RADIUS_METERS)
+    with _record_timed_step("주변 장소 후보 조회"):
+        query = _build_overpass_query(lat, lon, PLACE_LOOKUP_RADIUS_METERS)
 
-    try:
-        payload = _fetch_json(
-            OVERPASS_API_URL,
-            method="POST",
-            data=query.encode("utf-8"),
-        )
-    except (HTTPError, URLError, TimeoutError, ValueError):
-        return []
+        try:
+            payload = _fetch_json(
+                OVERPASS_API_URL,
+                method="POST",
+                data=query.encode("utf-8"),
+            )
+        except (HTTPError, URLError, TimeoutError, ValueError):
+            return []
 
-    elements = payload.get("elements") if isinstance(payload, dict) else None
-    if not elements:
-        return []
+        elements = payload.get("elements") if isinstance(payload, dict) else None
+        if not elements:
+            return []
 
-    candidates: list[dict[str, Any]] = []
-    seen_keys: set[tuple[str, str | None]] = set()
+        candidates: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str | None]] = set()
 
-    for element in elements:
-        tags = element.get("tags") or {}
-        name = tags.get("name")
-        if not name:
-            continue
+        for element in elements:
+            tags = element.get("tags") or {}
+            name = tags.get("name")
+            if not name:
+                continue
 
-        candidate_lat = element.get("lat")
-        candidate_lon = element.get("lon")
-        center = element.get("center") or {}
-        if candidate_lat is None:
-            candidate_lat = center.get("lat")
-        if candidate_lon is None:
-            candidate_lon = center.get("lon")
-        if candidate_lat is None or candidate_lon is None:
-            continue
+            candidate_lat = element.get("lat")
+            candidate_lon = element.get("lon")
+            center = element.get("center") or {}
+            if candidate_lat is None:
+                candidate_lat = center.get("lat")
+            if candidate_lon is None:
+                candidate_lon = center.get("lon")
+            if candidate_lat is None or candidate_lon is None:
+                continue
 
-        distance = _haversine_distance_meters(lat, lon, float(candidate_lat), float(candidate_lon))
-        dedupe_key = (name, tags.get("brand"))
-        if dedupe_key in seen_keys:
-            continue
-        seen_keys.add(dedupe_key)
+            distance = _haversine_distance_meters(lat, lon, float(candidate_lat), float(candidate_lon))
+            dedupe_key = (name, tags.get("brand"))
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
 
-        candidates.append(
-            {
-                "name": name,
-                "distance_meters": round(distance, 1),
-                "kind": tags.get("amenity") or tags.get("shop") or tags.get("tourism"),
-                "brand": tags.get("brand"),
-                "cuisine": tags.get("cuisine"),
-                "website": tags.get("website"),
-                "phone": tags.get("phone"),
-                "osm_type": element.get("type"),
-                "osm_id": element.get("id"),
-            }
-        )
+            candidates.append(
+                {
+                    "name": name,
+                    "distance_meters": round(distance, 1),
+                    "kind": tags.get("amenity") or tags.get("shop") or tags.get("tourism"),
+                    "brand": tags.get("brand"),
+                    "cuisine": tags.get("cuisine"),
+                    "website": tags.get("website"),
+                    "phone": tags.get("phone"),
+                    "osm_type": element.get("type"),
+                    "osm_id": element.get("id"),
+                }
+            )
 
-    candidates.sort(key=lambda item: item["distance_meters"])
-    return candidates[:limit]
+        candidates.sort(key=lambda item: item["distance_meters"])
+        return candidates[:limit]
 
 
 def lookup_place_info(image_path: Path) -> dict[str, Any] | None:
-    gps = extract_gps_info(image_path)
-    if not gps:
-        return None
+    with _record_timed_step("장소 정보 통합 조회"):
+        gps = extract_gps_info(image_path)
+        if not gps:
+            return None
 
-    lat = gps["latitude"]
-    lon = gps["longitude"]
-    reverse = reverse_geocode(lat, lon)
-    nearby_places = find_nearest_places(lat, lon, limit=3)
-    nearest_place = nearby_places[0] if nearby_places else None
+        lat = gps["latitude"]
+        lon = gps["longitude"]
+        reverse = reverse_geocode(lat, lon)
+        nearby_places = find_nearest_places(lat, lon, limit=3)
+        nearest_place = nearby_places[0] if nearby_places else None
 
-    return {
-        "gps": gps,
-        "reverse_geocode": reverse,
-        "nearest_place": nearest_place,
-        "nearby_places": nearby_places,
-    }
+        return {
+            "gps": gps,
+            "reverse_geocode": reverse,
+            "nearest_place": nearest_place,
+            "nearby_places": nearby_places,
+        }
 
 
 def cluster_media_by_gps(items: list[dict[str, Any]], max_distance_meters: float = 10.0) -> list[dict[str, Any]]:

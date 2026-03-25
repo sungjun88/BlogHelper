@@ -439,20 +439,114 @@ h1 {
   line-height: 1.15;
 }
 
-.matrix-place-count {
-  margin-top: 10px;
-  font-size: 13px;
-  font-weight: 700;
-  color: rgba(255, 255, 255, 0.78);
-}
-
 .matrix-place-address,
-.matrix-place-coords {
+.matrix-place-candidates {
   margin-top: 10px;
   font-size: 12px;
   line-height: 1.5;
   color: rgba(255, 255, 255, 0.68);
   word-break: break-word;
+}
+
+.matrix-place-candidate-panel {
+  margin-top: 16px;
+}
+
+.matrix-place-candidate-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.matrix-place-candidate-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.matrix-place-custom-input {
+  width: 100%;
+  margin-top: 10px;
+  min-height: 52px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: white;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.matrix-place-custom-input::placeholder {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.matrix-place-custom-input:focus {
+  outline: none;
+  border-color: rgba(231, 186, 144, 0.9);
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 0 0 3px rgba(231, 186, 144, 0.15);
+}
+
+.matrix-place-candidate {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  color: white;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.matrix-place-candidate:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.26);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.matrix-place-candidate.is-selected {
+  border-color: rgba(231, 186, 144, 0.9);
+  background: rgba(231, 186, 144, 0.18);
+}
+
+.matrix-place-candidate-rank {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.matrix-place-candidate-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.matrix-place-candidate-name {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.matrix-place-candidate-meta {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.62);
 }
 
 .matrix-cell {

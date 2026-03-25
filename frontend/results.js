@@ -14,6 +14,8 @@ const state = {
   categories: [],
   groupedImages: {},
   locationGroups: [],
+  selectedPlacesByGroup: {},
+  customPlacesByGroup: {},
   assignments: {},
   dragFilename: null,
   dragRowId: null,
@@ -108,13 +110,24 @@ function showHoverPreview(event, image) {
   const inferredPlaceName = placeInfo.inferred_place_name;
   const inferredAddress = placeInfo.inferred_address;
   const inferredFromNeighbors = placeInfo.inferred_from_neighbors;
+  const inferredFromTimeWindow = placeInfo.inferred_from_time_window;
+  const inferredSourceFilename = placeInfo.inferred_source_filename;
+  const inferredTimeDeltaMinutes = placeInfo.inferred_time_delta_minutes;
 
   state.hoverPreviewImage.src = image.image_url;
   state.hoverPreviewImage.alt = image.filename || "";
   state.hoverPreviewName.textContent = image.filename || "";
   state.hoverPreviewMeta.textContent = `${confidence} / ${classifierInfo.label} / ${sourceText} / ${labelText}`;
 
-  if (gps) {
+  if (inferredFromTimeWindow) {
+    const placeLabel = inferredPlaceName || nearest?.name || "Unknown";
+    const deltaLabel = Number.isFinite(inferredTimeDeltaMinutes)
+      ? ` / ${Math.round(inferredTimeDeltaMinutes)} min window`
+      : "";
+    state.hoverPreviewPlace.textContent =
+      `Inferred from ${inferredSourceFilename || "nearby capture time"} / ${placeLabel}` +
+      `${inferredAddress ? ` / ${inferredAddress}` : ""}${deltaLabel}`;
+  } else if (gps) {
     const gpsText = `GPS ${gps.latitude}, ${gps.longitude}`;
     const candidatesText = nearbyPlaces.length
       ? nearbyPlaces
@@ -509,29 +522,145 @@ function createHeaderRow() {
   return headerRow;
 }
 
+function getGroupPlaceCandidates(group) {
+  const candidateMap = new Map();
+  const items = Array.isArray(group.items) ? group.items : [];
+
+  if (group.place_name || group.address) {
+    candidateMap.set(`group::${group.place_name || ""}::${group.address || ""}`, {
+      id: `group::${group.group_id}`,
+      name: group.place_name || "Unknown place",
+      address: group.address || "No matched place name",
+      distance_meters: 0,
+      kind: "group",
+    });
+  }
+
+  items.forEach((item) => {
+    const placeInfo = item.place_info || {};
+    const nearbyPlaces = Array.isArray(placeInfo.nearby_places) ? placeInfo.nearby_places : [];
+    const reverse = placeInfo.reverse_geocode || {};
+    const inferredAddress = placeInfo.inferred_address;
+    const candidateAddress = reverse.display_name || inferredAddress || group.address || "";
+
+    nearbyPlaces.forEach((place) => {
+      if (!place?.name) {
+        return;
+      }
+
+      const key = `${place.name}::${place.brand || ""}::${candidateAddress}`;
+      const distance = Number.isFinite(place.distance_meters) ? place.distance_meters : Number.POSITIVE_INFINITY;
+      const current = candidateMap.get(key);
+
+      if (!current || distance < current.distance_meters) {
+        candidateMap.set(key, {
+          id: key,
+          name: place.name,
+          address: candidateAddress || "No matched place name",
+          distance_meters: distance,
+          kind: place.kind || "",
+        });
+      }
+    });
+  });
+
+  return Array.from(candidateMap.values())
+    .sort((left, right) => left.distance_meters - right.distance_meters)
+    .slice(0, 5);
+}
+
+function getSelectedPlaceCandidate(group, index) {
+  const candidates = getGroupPlaceCandidates(group);
+  const selectedId = state.selectedPlacesByGroup[group.group_id];
+  const selectedCandidate = candidates.find((candidate) => candidate.id === selectedId);
+  const customPlaceName = (state.customPlacesByGroup[group.group_id] || "").trim();
+
+  return {
+    selectedCandidate: selectedCandidate || candidates[0] || null,
+    candidates,
+    customPlaceName,
+    fallbackName: group.place_name || `Place ${index + 1}`,
+    fallbackAddress: group.address || "No matched place name",
+  };
+}
+
 function createPlaceLabel(group, index) {
   const label = document.createElement("aside");
   label.className = "matrix-row-label";
 
+  const { selectedCandidate, candidates, customPlaceName, fallbackName, fallbackAddress } = getSelectedPlaceCandidate(group, index);
+
   const name = document.createElement("h3");
   name.className = "matrix-place-title";
-  name.textContent = group.place_name || `Place ${index + 1}`;
-
-  const count = document.createElement("p");
-  count.className = "matrix-place-count";
-  count.textContent = `${group.count} items`;
+  name.textContent = customPlaceName || selectedCandidate?.name || fallbackName;
 
   const address = document.createElement("p");
   address.className = "matrix-place-address";
-  address.textContent = group.address || "No matched place name";
+  address.textContent = selectedCandidate?.address || fallbackAddress;
 
-  const coords = document.createElement("p");
-  coords.className = "matrix-place-coords";
-  coords.textContent = group.center
-    ? `${group.center.latitude}, ${group.center.longitude}`
-    : "No GPS center";
+  const candidatePanel = document.createElement("div");
+  candidatePanel.className = "matrix-place-candidate-panel";
 
-  label.append(name, count, address, coords);
+  const candidatePanelLabel = document.createElement("p");
+  candidatePanelLabel.className = "matrix-place-candidate-label";
+  candidatePanelLabel.textContent = "Place candidates";
+  candidatePanel.append(candidatePanelLabel);
+
+  const candidateList = document.createElement("div");
+  candidateList.className = "matrix-place-candidate-list";
+
+  if (candidates.length) {
+    candidates.forEach((candidate, candidateIndex) => {
+      const candidateButton = document.createElement("button");
+      candidateButton.type = "button";
+      candidateButton.className = "matrix-place-candidate";
+      if (selectedCandidate?.id === candidate.id) {
+        candidateButton.classList.add("is-selected");
+      }
+
+      candidateButton.innerHTML = `
+        <span class="matrix-place-candidate-rank">${candidateIndex + 1}</span>
+        <span class="matrix-place-candidate-text">
+          <span class="matrix-place-candidate-name">${candidate.name}</span>
+          <span class="matrix-place-candidate-meta">${Number.isFinite(candidate.distance_meters) ? `${Math.round(candidate.distance_meters)}m` : "distance unknown"}</span>
+        </span>
+      `;
+      candidateButton.addEventListener("click", () => {
+        state.selectedPlacesByGroup[group.group_id] = candidate.id;
+        state.customPlacesByGroup[group.group_id] = "";
+        renderMatrixBoard();
+      });
+      candidateList.append(candidateButton);
+    });
+  } else {
+    const empty = document.createElement("p");
+    empty.className = "matrix-place-candidates";
+    empty.textContent = "No place candidates";
+    candidateList.append(empty);
+  }
+
+  const customPlaceInput = document.createElement("input");
+  customPlaceInput.type = "text";
+  customPlaceInput.className = "matrix-place-custom-input";
+  customPlaceInput.placeholder = "찾으시는 업체가 없다면 직접 적어주세요";
+  customPlaceInput.value = state.customPlacesByGroup[group.group_id] || "";
+  customPlaceInput.addEventListener("input", (event) => {
+    state.customPlacesByGroup[group.group_id] = event.target.value;
+    name.textContent = event.target.value.trim() || selectedCandidate?.name || fallbackName;
+  });
+  customPlaceInput.addEventListener("blur", () => {
+    renderMatrixBoard();
+  });
+  customPlaceInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      customPlaceInput.blur();
+    }
+  });
+
+  candidatePanel.append(candidateList);
+  candidatePanel.append(customPlaceInput);
+  label.append(name, address, candidatePanel);
   return label;
 }
 
@@ -658,6 +787,8 @@ async function loadResults() {
   state.categories = result.categories || [];
   state.groupedImages = result.grouped_images || {};
   state.locationGroups = result.location_groups || [];
+  state.selectedPlacesByGroup = {};
+  state.customPlacesByGroup = {};
   state.assignments = result.assignments || {};
 
   updateAssignmentsFromGroups();
